@@ -605,6 +605,34 @@ app.post('/api/developer-access', (req, res) => {
   return res.json({ ok: true, notes });
 });
 
+app.post('/api/developer-notes/delete', (req, res) => {
+  if (!DEVELOPER_ACCESS_PASSWORD) {
+    return res.status(503).json({ ok: false, error: 'Developer access is not configured.' });
+  }
+  const password = String(req.body?.password || '');
+  if (password !== DEVELOPER_ACCESS_PASSWORD) {
+    return res.status(401).json({ ok: false, error: 'Invalid password.' });
+  }
+
+  let notes;
+  try {
+    notes = loadDeveloperNotes();
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: 'Unable to read saved notes.' });
+  }
+  if (!saveDeveloperNotes([])) {
+    return res.status(500).json({ ok: false, error: 'Unable to delete saved notes.' });
+  }
+  try {
+    if (loadDeveloperNotes().length > 0) {
+      return res.status(500).json({ ok: false, error: 'Saved notes remain after deletion.' });
+    }
+  } catch (error) {
+    return res.status(500).json({ ok: false, error: 'Unable to verify deleted notes.' });
+  }
+  return res.json({ ok: true, deletedCount: notes.length });
+});
+
 server.listen(PORT, () => {
   console.log(`Game server listening on http://localhost:${PORT}`);
 });
