@@ -34,9 +34,6 @@ const players = new Map();
 const rooms = new Map();
 const DEVELOPER_NOTES_FILE = process.env.DEVELOPER_NOTES_FILE || path.join(__dirname, '.runtime', 'developer-notes.json');
 const DEVELOPER_ACCESS_PASSWORD = process.env.DEVELOPER_ACCESS_PASSWORD;
-const SUPABASE_URL = String(process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '');
-const SUPABASE_SERVICE_ROLE_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
-const SUPABASE_NOTES_TABLE = 'developer_notes';
 
 function ensureDeveloperNotesFile() {
   const directory = path.dirname(DEVELOPER_NOTES_FILE);
@@ -91,74 +88,7 @@ function saveDeveloperNotes(notes) {
   }
 }
 
-function getDeveloperNotesStorage() {
-  const hasSupabaseUrl = Boolean(SUPABASE_URL);
-  const hasSupabaseKey = Boolean(SUPABASE_SERVICE_ROLE_KEY);
-  if (hasSupabaseUrl !== hasSupabaseKey) {
-    throw new Error('Both SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be configured.');
-  }
-  return hasSupabaseUrl ? 'supabase' : 'file';
-}
-
-async function supabaseNotesRequest(query, options = {}) {
-  const url = `${SUPABASE_URL}/rest/v1/${SUPABASE_NOTES_TABLE}${query}`;
-  const response = await fetch(url, {
-    method: options.method || 'GET',
-    headers: {
-      apikey: SUPABASE_SERVICE_ROLE_KEY,
-      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-      'Content-Type': 'application/json',
-      ...(options.headers || {})
-    },
-    body: options.body === undefined ? undefined : JSON.stringify(options.body)
-  });
-  const responseText = await response.text();
-  if (!response.ok) {
-    throw new Error(`Supabase request failed (${response.status}): ${responseText.slice(0, 500)}`);
-  }
-  if (!responseText) return [];
-  return JSON.parse(responseText);
-}
-
-async function loadDeveloperNotesFromSupabase() {
-  const notes = [];
-  const pageSize = 1000;
-  for (let offset = 0; ; offset += pageSize) {
-    const page = await supabaseNotesRequest(
-      `?select=id,message,created_at,source&order=created_at.desc,id.desc&limit=${pageSize}`,
-      {
-        headers: {
-          'Range-Unit': 'items',
-          Range: `${offset}-${offset + pageSize - 1}`
-        }
-      }
-    );
-    if (!Array.isArray(page)) {
-      throw new Error('Supabase returned an invalid developer notes response.');
-    }
-    notes.push(...page.map((entry) => ({
-      id: String(entry.id),
-      message: String(entry.message || '').trim(),
-      createdAt: String(entry.created_at || new Date().toISOString()),
-      source: String(entry.source || 'game')
-    })).filter((entry) => entry.message));
-    if (page.length < pageSize) return notes;
-  }
-}
-
-async function saveDeveloperNote(message) {
-  if (getDeveloperNotesStorage() === 'supabase') {
-    const inserted = await supabaseNotesRequest('?select=id', {
-      method: 'POST',
-      headers: { Prefer: 'return=representation' },
-      body: { message, source: 'game' }
-    });
-    if (!Array.isArray(inserted) || inserted.length !== 1) {
-      throw new Error('Supabase did not confirm that the developer note was saved.');
-    }
-    return inserted.length;
-  }
-
+function saveDeveloperNote(message) {
   const notes = loadDeveloperNotes();
   notes.unshift({
     id: crypto.randomUUID(),
@@ -172,26 +102,11 @@ async function saveDeveloperNote(message) {
   return notes.length;
 }
 
-async function getDeveloperNotes() {
-  return getDeveloperNotesStorage() === 'supabase'
-    ? loadDeveloperNotesFromSupabase()
-    : loadDeveloperNotes();
+function getDeveloperNotes() {
+  return loadDeveloperNotes();
 }
 
-async function deleteAllDeveloperNotes() {
-  if (getDeveloperNotesStorage() === 'supabase') {
-    const notesBeforeDeletion = await loadDeveloperNotesFromSupabase();
-    await supabaseNotesRequest('?id=gte.0', {
-      method: 'DELETE',
-      headers: { Prefer: 'return=minimal' }
-    });
-    const remaining = await loadDeveloperNotesFromSupabase();
-    if (remaining.length > 0) {
-      throw new Error('Developer notes remain in Supabase after deletion.');
-    }
-    return notesBeforeDeletion.length;
-  }
-
+function deleteAllDeveloperNotes() {
   const notes = loadDeveloperNotes();
   if (!saveDeveloperNotes([])) {
     throw new Error('Unable to delete developer notes from the local file.');
@@ -676,14 +591,14 @@ app.get('/health', (req, res) => {
   res.json({ ok: true, onlinePlayers: players.size });
 });
 
-app.post('/api/developer-note', async (req, res) => {
+app.post('/api/developer-note', (req, res) => {
   const message = String(req.body?.message || '').trim().slice(0, 1000);
   if (!message) {
     return res.status(400).json({ ok: false, error: 'Message is required.' });
   }
 
   try {
-    const count = await saveDeveloperNote(message);
+    const count = saveDeveloperNote(message);
     return res.json({ ok: true, count });
   } catch (error) {
     console.error('Unable to save developer note:', error);
@@ -691,7 +606,7 @@ app.post('/api/developer-note', async (req, res) => {
   }
 });
 
-app.post('/api/developer-access', async (req, res) => {
+app.post('/api/developer-access', (req, res) => {
   if (!DEVELOPER_ACCESS_PASSWORD) {
     return res.status(503).json({ ok: false, error: 'Developer access is not configured.' });
   }
@@ -701,7 +616,7 @@ app.post('/api/developer-access', async (req, res) => {
   }
 
   try {
-    const notes = await getDeveloperNotes();
+    const notes = getDeveloperNotes();
     return res.json({ ok: true, notes });
   } catch (error) {
     console.error('Unable to read saved notes:', error);
@@ -709,7 +624,7 @@ app.post('/api/developer-access', async (req, res) => {
   }
 });
 
-app.post('/api/developer-notes/delete', async (req, res) => {
+app.post('/api/developer-notes/delete', (req, res) => {
   if (!DEVELOPER_ACCESS_PASSWORD) {
     return res.status(503).json({ ok: false, error: 'Developer access is not configured.' });
   }
@@ -719,7 +634,7 @@ app.post('/api/developer-notes/delete', async (req, res) => {
   }
 
   try {
-    const deletedCount = await deleteAllDeveloperNotes();
+    const deletedCount = deleteAllDeveloperNotes();
     return res.json({ ok: true, deletedCount });
   } catch (error) {
     console.error('Unable to delete saved notes:', error);
@@ -728,14 +643,6 @@ app.post('/api/developer-notes/delete', async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  try {
-    if (getDeveloperNotesStorage() === 'file') {
-      console.warn('Supabase is not configured; developer notes are stored in a local file and may be lost on ephemeral hosts.');
-    } else {
-      console.log('Developer notes are configured to use Supabase.');
-    }
-  } catch (error) {
-    console.error('Invalid developer notes storage configuration:', error.message);
-  }
+  console.warn('Developer notes are stored in a local file and may be lost on ephemeral hosts.');
   console.log(`Game server listening on http://localhost:${PORT}`);
 });
